@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import joblib
 import numpy as np
-import onnxruntime_web as ort
+import onnxruntime as ort  # Changed from onnxruntime_web
 from fastapi.middleware.cors import CORSMiddleware
 import os
 
@@ -11,24 +11,37 @@ app = FastAPI(title="Phishing Detection API", version="1.0.0")
 # Add CORS middleware to allow requests from anywhere
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your app's domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load models
-try:
-    # Load vectorizers
-    word_vectorizer = joblib.load('model_files/word_vectorizer.pkl')
-    char_vectorizer = joblib.load('model_files/char_vectorizer.pkl')
+# Global variables for models
+word_vectorizer = None
+char_vectorizer = None
+onnx_session = None
+
+def load_models():
+    """Load ML models with error handling"""
+    global word_vectorizer, char_vectorizer, onnx_session
     
-    # Load ONNX model
-    onnx_session = ort.InferenceSession('model_files/phishing_model.onrx')
-    
-    print("✅ All models loaded successfully!")
-except Exception as e:
-    print(f"❌ Error loading models: {e}")
+    try:
+        # Load vectorizers
+        word_vectorizer = joblib.load('model_files/word_vectorizer.pkl')
+        char_vectorizer = joblib.load('model_files/char_vectorizer.pkl')
+        
+        # Load ONNX model - fixed file extension
+        onnx_session = ort.InferenceSession('model_files/phishing_model.onnx')
+        
+        print("✅ All models loaded successfully!")
+        return True
+    except Exception as e:
+        print(f"❌ Error loading models: {e}")
+        return False
+
+# Load models at startup
+models_loaded = load_models()
 
 class PredictionRequest(BaseModel):
     text: str
@@ -41,7 +54,10 @@ class PredictionResponse(BaseModel):
 
 def extract_features(text):
     """Extract features from text matching your training pipeline"""
-    # Basic text cleaning (replicate your training preprocessing)
+    if word_vectorizer is None or char_vectorizer is None:
+        raise ValueError("Models not loaded properly")
+    
+    # Basic text cleaning
     text = text.lower().strip()
     
     # Handcrafted features
@@ -52,7 +68,7 @@ def extract_features(text):
     word_features = word_vectorizer.transform([text])
     char_features = char_vectorizer.transform([text])
     
-    # Combine features (adjust dimensions based on your actual feature engineering)
+    # Combine features
     combined_features = np.hstack([
         word_features.toarray(),
         char_features.toarray(),
@@ -64,6 +80,14 @@ def extract_features(text):
 @app.post("/predict", response_model=PredictionResponse)
 async def predict_phishing(request: PredictionRequest):
     try:
+        if not models_loaded:
+            return PredictionResponse(
+                prediction=0,
+                confidence=0.0,
+                is_phishing=False,
+                status="error: Models not loaded"
+            )
+        
         # Extract features
         features = extract_features(request.text)
         
@@ -99,25 +123,35 @@ async def root():
     return {
         "message": "Phishing Detection API", 
         "status": "active",
+        "models_loaded": models_loaded,
         "endpoints": {
             "health": "/health",
-            "predict": "/predict (POST)"
+            "predict": "/predict (POST)",
+            "docs": "/docs"
         }
     }
 
 @app.get("/health")
 async def health_check():
     try:
-        # Test model loading
-        test_features = extract_features("test message")
-        return {
-            "status": "healthy", 
-            "models_loaded": True,
-            "service": "phishing-detection-api"
-        }
+        if models_loaded:
+            # Test with a simple prediction
+            test_features = extract_features("test message")
+            return {
+                "status": "healthy", 
+                "models_loaded": True,
+                "service": "phishing-detection-api"
+            }
+        else:
+            return {
+                "status": "unhealthy", 
+                "models_loaded": False,
+                "error": "Models failed to load"
+            }
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
 
+# For local development
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
